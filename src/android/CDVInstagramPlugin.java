@@ -48,7 +48,9 @@ import org.json.JSONException;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FilenameFilter;
-import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 @TargetApi(Build.VERSION_CODES.FROYO)
@@ -60,6 +62,8 @@ public class CDVInstagramPlugin extends CordovaPlugin {
             return name.startsWith("instagram");
         }
     };
+    public static final String INSTAGRAM_ANDROID = "com.instagram.android";
+    public static final String TAG_INSTAGRAM_PLUGIN = "Instagram";
 
     CallbackContext cbContext;
 
@@ -77,6 +81,14 @@ public class CDVInstagramPlugin extends CordovaPlugin {
 
             this.share(imageString, captionString);
             return true;
+        } else if (action.equals("shareAsset")) {
+            JSONArray assetsPaths = args.getJSONArray(0);
+
+            PluginResult result = new PluginResult(Status.NO_RESULT);
+            result.setKeepCallback(true);
+
+            this.shareAsset(assetsPaths);
+            return true;
         } else if (action.equals("isInstalled")) {
             this.isInstalled();
         } else {
@@ -87,8 +99,8 @@ public class CDVInstagramPlugin extends CordovaPlugin {
 
     private void isInstalled() {
         try {
-            this.webView.getContext().getPackageManager().getApplicationInfo("com.instagram.android", 0);
-            this.cbContext.success(this.webView.getContext().getPackageManager().getPackageInfo("com.instagram.android", 0).versionName);
+            this.webView.getContext().getPackageManager().getApplicationInfo(INSTAGRAM_ANDROID, 0);
+            this.cbContext.success(this.webView.getContext().getPackageManager().getPackageInfo(INSTAGRAM_ANDROID, 0).versionName);
         } catch (PackageManager.NameNotFoundException e) {
             this.cbContext.error("Application not installed");
         }
@@ -137,36 +149,82 @@ public class CDVInstagramPlugin extends CordovaPlugin {
                 shareIntent.putExtra(Intent.EXTRA_STREAM, uri);
                 shareIntent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             }
-
             shareIntent.putExtra(Intent.EXTRA_TEXT, captionString);
-            shareIntent.setPackage("com.instagram.android");
+            shareToInstagram(shareIntent, new ArrayList<Uri>() {{add(uri);}});
+        } else {
+            this.cbContext.error("Expected one non-empty string argument.");
+        }
+    }
 
-            Intent chooser = Intent.createChooser(shareIntent, "Share to");
+    private void shareAsset(JSONArray files) {
+        if (files.length() > 0) {
+            Intent shareIntent = new Intent();
+            boolean hasMultipleAttachments = files.length() > 1;
+            shareIntent.setAction(hasMultipleAttachments
+                    ? Intent.ACTION_SEND_MULTIPLE
+                    : Intent.ACTION_SEND);
 
-            List<ResolveInfo> resInfoList = this.cordova.getActivity().getPackageManager()
-                    .queryIntentActivities(chooser, PackageManager.MATCH_DEFAULT_ONLY);
+            Uri fileUri;
+            ArrayList<Uri> fileUris = new ArrayList<>();
+            for (int i = 0; i < files.length(); i++) {
+                try {
+                    File parentDir = this.webView.getContext().getExternalFilesDir(null);
+                    String filename = "file://" + parentDir + "/" + files.getString(i);
+                    fileUri = Uri.parse(filename);
+                    fileUri = FileProvider.getUriForFile(
+                            this.cordova.getActivity().getApplicationContext(),
+                            this.cordova.getActivity().getPackageName() + ".provider",
+                            new File(fileUri.getPath()));
+                    fileUris.add(fileUri);
+                } catch (Exception e) {
+                    Log.e(TAG_INSTAGRAM_PLUGIN, "Cannot parse asset #" + i);
+                }
+            }
 
-            for (ResolveInfo resolveInfo : resInfoList) {
-                String packageName = resolveInfo.activityInfo.packageName;
+            if (hasMultipleAttachments) {
+                shareIntent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, fileUris);
+            } else {
+                shareIntent.putExtra(Intent.EXTRA_STREAM, fileUris.get(0));
+            }
+
+            shareIntent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            shareIntent.setType("*/*");
+
+            shareToInstagram(shareIntent, fileUris);
+        } else {
+            this.cbContext.error("Expected one non-empty array argument.");
+        }
+    }
+
+    private void shareToInstagram(Intent shareIntent, ArrayList<Uri> fileUris) {
+        shareIntent.setPackage(INSTAGRAM_ANDROID);
+        Intent chooser = Intent.createChooser(shareIntent, "Share to");
+        setUriPermissionsForTheIntent(fileUris, chooser);
+        this.cordova.startActivityForResult((CordovaPlugin) this, chooser, 12345);
+    }
+
+    private void setUriPermissionsForTheIntent(ArrayList<Uri> fileUris, Intent chooser) {
+        List<ResolveInfo> resInfoList = this.cordova.getActivity().getPackageManager()
+                .queryIntentActivities(chooser, PackageManager.MATCH_DEFAULT_ONLY);
+
+        for (ResolveInfo resolveInfo : resInfoList) {
+            String packageName = resolveInfo.activityInfo.packageName;
+            for (Uri uri: fileUris) {
                 this.cordova.getActivity().grantUriPermission(packageName, uri,
                         Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
             }
-
-            this.cordova.startActivityForResult((CordovaPlugin) this, chooser, 12345);
-        } else {
-            this.cbContext.error("Expected one non-empty string argument.");
         }
     }
 
     @Override
     public void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (resultCode == Activity.RESULT_OK) {
-            Log.v("Instagram", "shared ok");
+            Log.v(TAG_INSTAGRAM_PLUGIN, "shared ok");
             if(this.cbContext != null) {
                 this.cbContext.success();
             }
         } else if (resultCode == Activity.RESULT_CANCELED) {
-            Log.v("Instagram", "share cancelled");
+            Log.v(TAG_INSTAGRAM_PLUGIN, "share cancelled");
             if(this.cbContext != null) {
                 this.cbContext.error("Share Cancelled");
             }
